@@ -1,0 +1,80 @@
+name: Build and Deploy Avertoo Server TS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: avertoo-production
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/menu682/avertoo-server-ts
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          envs: GHCR_USERNAME,GHCR_TOKEN
+          script_stop: true
+          script: |
+            set -eu
+
+            echo "$GHCR_TOKEN" | docker login ghcr.io \
+              -u "$GHCR_USERNAME" --password-stdin
+
+            cd /home/avertoo/avertoo
+
+            docker pull ghcr.io/menu682/avertoo-server-ts:latest
+
+            docker run --rm \
+              --network avertoo_shared \
+              --env-file .env \
+              ghcr.io/menu682/avertoo-server-ts:latest \
+              npx prisma migrate deploy
+
+            docker compose -f compose.yml up -d \
+              --no-deps --force-recreate avertoo-server
+
+            docker compose -f /home/avertoo/infra/compose.yml up -d nginx
+
+            docker image prune -f
