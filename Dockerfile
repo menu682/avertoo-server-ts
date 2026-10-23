@@ -7,7 +7,7 @@ RUN npm ci
 
 COPY . .
 
-RUN npx prisma generate
+RUN DATABASE_URL="postgresql://build:build@127.0.0.1:5432/avertoo" npx prisma generate
 RUN npm run build
 
 
