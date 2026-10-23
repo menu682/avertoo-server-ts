@@ -1,0 +1,12 @@
+model User {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  userId       BigInt   @unique @map("user_id")
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  refreshToken    RefreshToken?
+  devicePushToken DevicePushToken?
+
+  @@map("users")
+}

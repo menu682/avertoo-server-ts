@@ -1,0 +1,7 @@
+model ReservedUserId {
+  userId     BigInt   @id @map("user_id")
+  reservedAt DateTime @default(now()) @map("reserved_at")
+  note       String?
+
+  @@map("reserved_user_ids")
+}

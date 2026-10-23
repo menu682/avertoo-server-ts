@@ -1,0 +1,17 @@
+enum PrivateChatStatus {
+  PENDING
+  ACTIVE
+}
+
+model PrivateChat {
+  id        String           @id @default(uuid(7)) @db.Uuid
+  creatorId String           @map("creator_id") @db.Uuid
+  peerId    String           @map("peer_id") @db.Uuid
+  status    PrivateChatStatus @default(PENDING)
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+
+  @@index([creatorId, status])
+  @@index([peerId, status])
+  @@map("private_chats")
+}
