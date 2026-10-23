@@ -1,0 +1,11 @@
+cd ~/Projects/avertoo-server-ts && cat > .dockerignore <<'EOF'
+node_modules
+dist
+.git
+.idea
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+coverage
+EOF
