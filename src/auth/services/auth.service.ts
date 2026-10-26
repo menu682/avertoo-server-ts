@@ -4,7 +4,7 @@ import {
     UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomInt } from 'node:crypto';
 import * as argon2 from 'argon2';
 import { Prisma } from '../../generated/prisma/client.js';
 
@@ -33,17 +33,23 @@ export class AuthService {
     ): Promise<RegisterResponseDto> {
         await this.verifyCaptcha( dto.captchaToken );
 
-        const userId = BigInt( dto.userId );
+        const requestedUserId = dto.userId?.trim();
+
         const passwordHash = await this.hashPassword( dto.password );
         const refreshToken = this.generateRefreshToken();
         const refreshTokenHash = this.hashRefreshToken( refreshToken );
-        const accessToken = await this.generateAccessToken( dto.userId );
 
-        await this.createUserWithSession( {
-            userId,
+        const userId = await this.createUserWithSession( {
+            userId: requestedUserId
+                ? BigInt( requestedUserId )
+                : undefined,
             passwordHash,
             refreshTokenHash,
         } );
+
+        const accessToken = await this.generateAccessToken(
+            userId.toString(),
+        );
 
         return {
             accessToken,
@@ -227,30 +233,70 @@ export class AuthService {
     }
 
     private async createUserWithSession( params: {
-        userId: bigint;
+        userId?: bigint;
         passwordHash: string;
         refreshTokenHash: string;
-    } ): Promise<void> {
-        const { userId, passwordHash, refreshTokenHash } = params;
+    } ): Promise<bigint> {
+        const {
+            userId: requestedUserId,
+            passwordHash,
+            refreshTokenHash,
+        } = params;
 
-        await this.prisma.$transaction( async ( tx ) => {
-            await this.ensureUserIdAvailable( userId, tx );
+        // Якщо ID заданий користувачем — одна спроба.
+        // Якщо ні — до 10 спроб автоматичної генерації.
+        const maxAttempts = requestedUserId ? 1 : 10;
 
-            const user = await tx.user.create( {
-                data: {
-                    userId,
-                    passwordHash,
-                },
-            } );
+        for ( let attempt = 0; attempt < maxAttempts; attempt++ ) {
+            const userId =
+                requestedUserId ??
+                BigInt( randomInt( 1_000_000_000, 10_000_000_000 ) );
 
-            await tx.refreshToken.create( {
-                data: {
-                    userId: user.id,
-                    tokenHash: refreshTokenHash,
-                    expiresAt: this.getRefreshTokenExpiry(),
-                },
-            } );
-        } );
+            try {
+                await this.prisma.$transaction( async ( tx ) => {
+                    await this.ensureUserIdAvailable( userId, tx );
+
+                    const user = await tx.user.create( {
+                        data: {
+                            userId,
+                            passwordHash,
+                        },
+                    } );
+
+                    await tx.refreshToken.create( {
+                        data: {
+                            userId: user.id,
+                            tokenHash: refreshTokenHash,
+                            expiresAt: this.getRefreshTokenExpiry(),
+                        },
+                    } );
+                } );
+
+                return userId;
+            } catch ( error ) {
+                if ( requestedUserId ) {
+                    throw error;
+                }
+
+                // Згенерований ID уже міг бути зайнятий
+                // або зарезервований — спробуємо інший.
+                if (
+                    error instanceof ConflictException ||
+                    (
+                        error instanceof Prisma.PrismaClientKnownRequestError &&
+                        error.code === 'P2002'
+                    )
+                ) {
+                    continue;
+                }
+
+                throw error;
+            }
+        }
+
+        throw new ConflictException(
+            'Could not generate an available user ID',
+        );
     }
 
     private async ensureUserIdAvailable(
