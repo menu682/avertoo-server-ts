@@ -14,6 +14,8 @@ import { RegisterRequestDto } from '../dto/register.request.dto.js';
 import { RegisterResponseDto } from '../dto/register.response.dto.js';
 import { LoginRequestDto } from '../dto/login.request.dto.js';
 import { LoginResponseDto } from '../dto/login.response.dto.js';
+import { RefreshRequestDto } from '../dto/refresh.request.dto.js';
+import { RefreshResponseDto } from '../dto/refresh.response.dto.js';
 
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -68,6 +70,62 @@ export class AuthService {
             accessToken,
             refreshToken,
         };
+    }
+
+    async refresh(
+        dto: RefreshRequestDto,
+    ): Promise<RefreshResponseDto> {
+        const oldTokenHash = this.hashRefreshToken( dto.refreshToken );
+
+        const refreshToken = this.generateRefreshToken();
+        const refreshTokenHash = this.hashRefreshToken( refreshToken );
+
+        return this.prisma.$transaction( async ( tx ) => {
+            const existingToken = await tx.refreshToken.findUnique( {
+                where: { tokenHash: oldTokenHash },
+            } );
+
+            if (
+                !existingToken ||
+                existingToken.expiresAt.getTime() <= Date.now()
+            ) {
+                throw new UnauthorizedException( 'Invalid or expired refresh token' );
+            }
+
+            const rotation = await tx.refreshToken.updateMany( {
+                where: {
+                    id: existingToken.id,
+                    tokenHash: oldTokenHash,
+                    expiresAt: { gt: new Date() },
+                },
+                data: {
+                    tokenHash: refreshTokenHash,
+                    expiresAt: this.getRefreshTokenExpiry(),
+                },
+            } );
+
+            if ( rotation.count !== 1 ) {
+                throw new UnauthorizedException( 'Invalid or expired refresh token' );
+            }
+
+            const user = await tx.user.findUnique( {
+                where: { id: existingToken.userId },
+                select: { userId: true },
+            } );
+
+            if ( !user ) {
+                throw new UnauthorizedException( 'Invalid or expired refresh token' );
+            }
+
+            const accessToken = await this.generateAccessToken(
+                user.userId.toString(),
+            );
+
+            return {
+                accessToken,
+                refreshToken,
+            };
+        } );
     }
 
     private async verifyCaptcha( token: string ): Promise<void> {
