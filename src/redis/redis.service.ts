@@ -14,12 +14,20 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
     constructor() {
         const url = process.env.REDIS_URL;
+        const password = process.env.REDIS_PASSWORD;
 
         if ( !url ) {
             throw new Error( 'REDIS_URL is not configured' );
         }
 
-        this.client = createClient( { url } );
+        if ( !password ) {
+            throw new Error( 'REDIS_PASSWORD is not configured' );
+        }
+
+        this.client = createClient( {
+            url,
+            password,
+        } );
 
         this.client.on( 'error', ( error: Error ) => {
             this.logger.error( `Redis error: ${ error.message }` );
@@ -36,7 +44,8 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
         }
 
         if ( !this.connecting ) {
-            this.connecting = this.client.connect()
+            this.connecting = this.client
+                .connect()
                 .then( () => {
                     this.logger.log( 'Connected to Redis' );
                 } )
