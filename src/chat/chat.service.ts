@@ -23,8 +23,17 @@ export class ChatService {
         const chats = await this.prisma.privateChat.findMany( {
             where: {
                 OR: [
-                    { creatorId: user.id },
-                    { peerId: user.id },
+                    {
+                        creatorId: user.id,
+                        status: PrivateChatStatus.PENDING,
+                    },
+                    {
+                        OR: [
+                            { creatorId: user.id },
+                            { peerId: user.id },
+                        ],
+                        status: PrivateChatStatus.ACTIVE,
+                    },
                 ],
             },
             orderBy: {
