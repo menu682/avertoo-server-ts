@@ -6,16 +6,25 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import {
+    ConnectedSocket,
+    MessageBody,
     OnGatewayConnection,
     OnGatewayDisconnect,
     OnGatewayInit,
+    SubscribeMessage,
     WebSocketGateway,
     WebSocketServer,
+    WsException,
 } from '@nestjs/websockets';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import type { RedisClientType } from 'redis';
 import type { Server, Socket } from 'socket.io';
 
 import { RedisService } from '../redis/redis.service.js';
+import { ChatService } from '../chat/chat.service.js';
+import { CreateChatDto } from '../chat/dto/create-chat.dto.js';
+import { DeleteChatDto } from '../chat/dto/delete-chat.dto.js';
 
 const CONNECTION_TTL_SECONDS = 90;
 
@@ -50,6 +59,7 @@ export class WebSocketGatewayService
     constructor(
         private readonly jwtService: JwtService,
         redisService: RedisService,
+        private readonly chatService: ChatService,
     ) {
         this.redis = redisService.getClient();
     }
@@ -101,7 +111,6 @@ export class WebSocketGatewayService
         const key = this.getConnectionKey( userId );
 
         try {
-            // Атомарно реєструємо нове з'єднання та отримуємо попереднє.
             const previousValue = await this.redis.eval(
                 `
                 local previous = redis.call('GET', KEYS[1])
@@ -137,8 +146,10 @@ export class WebSocketGatewayService
                 }
             }
 
-            // Використовуємо системний heartbeat Socket.IO.
-            // Коли приходить pong, оновлюємо TTL запису в Redis.
+            // Персональна кімната дає змогу повідомляти користувача
+            // через Socket.IO та Redis adapter, навіть на іншому сервері.
+            await socket.join( this.getUserRoom( userId ) );
+
             socket.conn.on( 'packet', ( packet ) => {
                 if ( packet.type !== 'pong' ) {
                     return;
@@ -195,7 +206,6 @@ export class WebSocketGatewayService
         const key = this.getConnectionKey( userId );
 
         try {
-            // Старий сокет не може видалити запис нового сокета.
             await this.redis.eval(
                 `
                 local value = redis.call('GET', KEYS[1])
@@ -226,6 +236,173 @@ export class WebSocketGatewayService
                 error instanceof Error ? error.stack : String( error ),
             );
         }
+    }
+
+    @SubscribeMessage( 'chats.list' )
+    async handleChatsList(
+        @ConnectedSocket() socket: Socket,
+    ): Promise<void> {
+        try {
+            const userId = this.getSocketUserId( socket );
+            const chats = await this.chatService.getChats( userId );
+
+            socket.emit( 'chats.list.updated', { chats } );
+        } catch ( error ) {
+            this.emitChatError( socket, error );
+        }
+    }
+
+    @SubscribeMessage( 'chats.create' )
+    async handleCreateChat(
+        @ConnectedSocket() socket: Socket,
+        @MessageBody() payload: unknown,
+    ): Promise<void> {
+        try {
+            const userId = this.getSocketUserId( socket );
+            const dto = await this.validatePayload(
+                CreateChatDto,
+                payload,
+            );
+
+            const chat = await this.chatService.createChat(
+                userId,
+                dto.peerId,
+            );
+
+            socket.emit( 'chats.chat.updated', chat );
+
+            await this.emitUpdatedLists( [
+                userId,
+                chat.peerId,
+            ] );
+        } catch ( error ) {
+            this.emitChatError( socket, error );
+        }
+    }
+
+    @SubscribeMessage( 'chats.delete' )
+    async handleDeleteChat(
+        @ConnectedSocket() socket: Socket,
+        @MessageBody() payload: unknown,
+    ): Promise<void> {
+        try {
+            const userId = this.getSocketUserId( socket );
+            const dto = await this.validatePayload(
+                DeleteChatDto,
+                payload,
+            );
+
+            const result = await this.chatService.deleteChat(
+                userId,
+                dto.chatId,
+            );
+
+            for ( const participantUserId of result.participantUserIds ) {
+                this.server
+                    .to( this.getUserRoom( participantUserId ) )
+                    .emit( 'chats.chat.deleted', {
+                        chatId: result.chatId,
+                    } );
+            }
+
+            await this.emitUpdatedLists( result.participantUserIds );
+        } catch ( error ) {
+            this.emitChatError( socket, error );
+        }
+    }
+
+    private async validatePayload<T extends object>(
+        dtoClass: new () => T,
+        payload: unknown,
+    ): Promise<T> {
+        const input =
+            payload !== null &&
+            typeof payload === 'object' &&
+            !Array.isArray( payload )
+                ? payload
+                : {};
+
+        const dto = plainToInstance( dtoClass, input );
+
+        const errors = await validate( dto, {
+            whitelist: true,
+            forbidNonWhitelisted: true,
+            forbidUnknownValues: true,
+        } );
+
+        if ( errors.length > 0 ) {
+            const details = errors.flatMap( ( error ) =>
+                Object.values( error.constraints ?? {} ),
+            );
+
+            throw new WsException( {
+                code: 'VALIDATION_ERROR',
+                message: 'Некоректні дані запиту',
+                details,
+            } );
+        }
+
+        return dto;
+    }
+
+    private getSocketUserId( socket: Socket ): string {
+        const userId = socket.data.userId;
+
+        if (
+            typeof userId !== 'string' ||
+            !/^\d{10}$/.test( userId )
+        ) {
+            throw new WsException( {
+                code: 'UNAUTHORIZED',
+                message: 'Необхідна авторизація',
+            } );
+        }
+
+        return userId;
+    }
+
+    private async emitUpdatedLists( userIds: string[] ): Promise<void> {
+        for ( const userId of new Set( userIds ) ) {
+            try {
+                const chats = await this.chatService.getChats( userId );
+
+                this.server
+                    .to( this.getUserRoom( userId ) )
+                    .emit( 'chats.list.updated', { chats } );
+            } catch ( error ) {
+                this.logger.error(
+                    `Could not update chat list for user ${ userId }`,
+                    error instanceof Error ? error.stack : String( error ),
+                );
+            }
+        }
+    }
+
+    private emitChatError( socket: Socket, error: unknown ): void {
+        if ( error instanceof WsException ) {
+            const response = error.getError();
+
+            if ( typeof response === 'string' ) {
+                socket.emit( 'chats.error', {
+                    code: 'CHAT_ERROR',
+                    message: response,
+                } );
+            } else {
+                socket.emit( 'chats.error', response );
+            }
+
+            return;
+        }
+
+        this.logger.error(
+            'Chat operation failed',
+            error instanceof Error ? error.stack : String( error ),
+        );
+
+        socket.emit( 'chats.error', {
+            code: 'INTERNAL_ERROR',
+            message: 'Не вдалося виконати операцію з чатом',
+        } );
     }
 
     private async refreshConnection(
@@ -261,5 +438,9 @@ export class WebSocketGatewayService
 
     private getConnectionKey( userId: string ): string {
         return `avertoo:foreground:${ userId }`;
+    }
+
+    private getUserRoom( userId: string ): string {
+        return `user:${ userId }`;
     }
 }
