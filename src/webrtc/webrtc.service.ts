@@ -84,58 +84,35 @@ export class WebRtcService {
         );
 
         const otherUserId = participants.otherUserId;
-        const sessionKey = this.getSessionKey( chatId );
-        const existingValue = await this.redis.get( sessionKey );
-        let replacedSessionId: string | null = null;
-
-        if ( existingValue ) {
-            try {
-                const existing = JSON.parse( existingValue ) as WebRtcSession;
-                if ( this.isValidSessionForParticipants(
-                    existing,
-                    chatId,
-                    participants.creatorUserId,
-                    participants.peerUserId,
-                ) ) {
-                    replacedSessionId = existing.sessionId;
-                }
-            } catch {
-                // Ignore malformed old session state and replace it below.
-            }
-        }
-
-        if ( !peerHasChatOpen ) {
-            if ( existingValue ) {
-                await this.redis.eval(
-                    `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0`,
-                    { keys: [ sessionKey ], arguments: [ existingValue ] },
-                );
-            }
-            return {
-                state: this.notReadyState( chatId, otherUserId ),
-                replacedSessionId,
-            };
-        }
-
-        const session: WebRtcSession = {
-            chatId,
-            sessionId: randomUUID(),
-            offererId: userId,
-            userA: userId,
-            userB: otherUserId,
-            createdAt: Date.now(),
+        const sessionKey = this.getSessionKey(chatId);
+        const candidate: WebRtcSession = {
+            chatId, sessionId: randomUUID(), offererId: userId,
+            userA: userId, userB: otherUserId, createdAt: Date.now(),
         };
-
-        await this.redis.set(
-            sessionKey,
-            JSON.stringify( session ),
-            { EX: SESSION_TTL_SECONDS },
-        );
-
-        return {
-            state: this.toPresence( userId, otherUserId, session ),
-            replacedSessionId,
-        };
+        // One atomic decision: simultaneous opens and duplicate socket events
+        // must reuse the same session rather than continually replacing it.
+        const raw: unknown = await this.redis.eval(`
+            local current = redis.call('GET', KEYS[1])
+            if ARGV[2] == '0' then return '' end
+            if current then
+                local ok, value = pcall(cjson.decode, current)
+                if ok and value.chatId == ARGV[3] and type(value.sessionId) == 'string'
+                    and ((value.userA == ARGV[4] and value.userB == ARGV[5])
+                      or (value.userA == ARGV[5] and value.userB == ARGV[4]))
+                    and (value.offererId == ARGV[4] or value.offererId == ARGV[5]) then
+                    redis.call('EXPIRE', KEYS[1], ARGV[6])
+                    return current
+                end
+            end
+            redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[6])
+            return ARGV[1]
+        `, { keys: [sessionKey], arguments: [JSON.stringify(candidate), peerHasChatOpen ? '1' : '0',
+            chatId, participants.creatorUserId, participants.peerUserId, String(SESSION_TTL_SECONDS)] });
+        if (typeof raw !== 'string' || !raw) {
+            return { state: this.notReadyState(chatId, otherUserId), replacedSessionId: null };
+        }
+        const session = JSON.parse(raw) as WebRtcSession;
+        return { state: this.toPresence(userId, otherUserId, session), replacedSessionId: null };
     }
 
     /**
