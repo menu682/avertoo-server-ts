@@ -69,6 +69,10 @@ export class WebRtcService {
         await this.getChatParticipants( userId, chatId );
     }
 
+    async getPeerId(userId: string, chatId: string): Promise<string> {
+        return (await this.getChatParticipants(userId, chatId)).otherUserId;
+    }
+
     async openChat(
         userId: string,
         chatId: string,

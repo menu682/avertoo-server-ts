@@ -61,7 +61,6 @@ export class WebSocketGatewayService
         }
 
         await this.connectionService.registerConnection(
-            this.server,
             socket,
             userId,
         );
@@ -113,6 +112,14 @@ export class WebSocketGatewayService
             socket,
             payload,
         );
+    }
+
+    @SubscribeMessage( 'webrtc.wake' )
+    async handleWebRtcWake(
+        @ConnectedSocket() socket: Socket,
+        @MessageBody() payload: unknown,
+    ): Promise<void> {
+        await this.webRtcService.wakePeer( this.server, socket, payload );
     }
 
     @SubscribeMessage( 'webrtc.chat.close' )

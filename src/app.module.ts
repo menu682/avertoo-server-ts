@@ -9,6 +9,7 @@ import { PrismaModule } from './prisma/prisma.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { RedisModule } from './redis/redis.module.js';
 import { WebSocketModule } from './websocket/websocket.module.js';
+import { TurnCredentialsModule } from './turn-credentials/turn-credentials.module.js';
 
 @Module( {
     imports: [
@@ -18,6 +19,7 @@ import { WebSocketModule } from './websocket/websocket.module.js';
         RedisModule,
         AuthModule,
         WebSocketModule,
+        TurnCredentialsModule,
     ],
     controllers: [ AppController ],
     providers: [ AppService ],

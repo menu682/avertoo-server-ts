@@ -4,7 +4,7 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { RedisClientType } from 'redis';
-import type { Server, Socket } from 'socket.io';
+import type { Socket } from 'socket.io';
 
 import { RedisService } from '../redis/redis.service.js';
 import type { ConnectionRecord } from './websocket.types.js';
@@ -27,7 +27,6 @@ export class WebSocketConnectionService {
     }
 
     async registerConnection(
-        server: Server,
         socket: Socket,
         userId: string,
     ): Promise<void> {
@@ -38,40 +37,11 @@ export class WebSocketConnectionService {
         };
 
         try {
-            const previousValue = await this.redis.eval(
-                `
-                local previous = redis.call('GET', KEYS[1])
-                redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
-                return previous
-                `,
-                {
-                    keys: [ this.getConnectionKey( userId ) ],
-                    arguments: [
-                        JSON.stringify( record ),
-                        String( CONNECTION_TTL_SECONDS ),
-                    ],
-                },
+            await this.redis.set(
+                this.getConnectionKey(userId, socket.id),
+                JSON.stringify(record),
+                { EX: CONNECTION_TTL_SECONDS },
             );
-
-            if ( typeof previousValue === 'string' ) {
-                try {
-                    const previous =
-                        JSON.parse( previousValue ) as ConnectionRecord;
-
-                    if (
-                        typeof previous.socketId === 'string' &&
-                        previous.socketId !== socket.id
-                    ) {
-                        server
-                            .in( previous.socketId )
-                            .disconnectSockets( true );
-                    }
-                } catch {
-                    this.logger.warn(
-                        `Invalid previous connection record for user ${ userId }`,
-                    );
-                }
-            }
 
             await socket.join( this.getUserRoom( userId ) );
 
@@ -132,22 +102,15 @@ export class WebSocketConnectionService {
             await this.redis.eval(
                 `
                 local value = redis.call('GET', KEYS[1])
-
                 if value then
                     local record = cjson.decode(value)
-
-                    if record.socketId == ARGV[1]
-                       and record.instanceId == ARGV[2] then
+                    if record.socketId == ARGV[1] and record.instanceId == ARGV[2] then
                         return redis.call('DEL', KEYS[1])
                     end
                 end
-
                 return 0
                 `,
-                {
-                    keys: [ this.getConnectionKey( userId ) ],
-                    arguments: [ socket.id, this.instanceId ],
-                },
+                { keys: [ this.getConnectionKey(userId, socket.id) ], arguments: [ socket.id, this.instanceId ] },
             );
 
             this.logger.log(
@@ -165,22 +128,18 @@ export class WebSocketConnectionService {
         record: ConnectionRecord,
     ): Promise<boolean> {
         const result = await this.redis.eval(
-            `
+                `
             local value = redis.call('GET', KEYS[1])
-
             if value then
                 local current = cjson.decode(value)
-
-                if current.socketId == ARGV[1]
-                   and current.instanceId == ARGV[2] then
+                if current.socketId == ARGV[1] and current.instanceId == ARGV[2] then
                     return redis.call('EXPIRE', KEYS[1], ARGV[3])
                 end
             end
-
             return 0
             `,
             {
-                keys: [ this.getConnectionKey( record.userId ) ],
+                keys: [ this.getConnectionKey( record.userId, record.socketId ) ],
                 arguments: [
                     record.socketId,
                     record.instanceId,
@@ -192,8 +151,8 @@ export class WebSocketConnectionService {
         return result === 1;
     }
 
-    private getConnectionKey( userId: string ): string {
-        return `avertoo:foreground:${ userId }`;
+    private getConnectionKey( userId: string, socketId: string ): string {
+        return `avertoo:foreground:${ userId }:${ socketId }`;
     }
 
     private getUserRoom( userId: string ): string {

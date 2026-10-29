@@ -16,6 +16,7 @@ import {
 import { WebRtcService } from '../webrtc/webrtc.service.js';
 import { WebSocketAuthService } from './websocket-auth.service.js';
 import { WebSocketValidationService } from './websocket-validation.service.js';
+import { PushService } from '../push/push.service.js';
 
 @Injectable()
 export class WebSocketWebRtcService {
@@ -27,7 +28,22 @@ export class WebSocketWebRtcService {
         private readonly webRtcService: WebRtcService,
         private readonly authService: WebSocketAuthService,
         private readonly validationService: WebSocketValidationService,
+        private readonly pushService: PushService,
     ) {
+    }
+
+    async wakePeer(server: Server, socket: Socket, payload: unknown): Promise<void> {
+        const userId = this.authService.getSocketUserId(socket);
+        if (typeof payload !== 'object' || payload === null || !('chatId' in payload) ||
+            typeof payload.chatId !== 'string' || !/^[0-9a-f-]{36}$/i.test(payload.chatId)) return;
+        const chatId = payload.chatId;
+        try {
+            const peerId = await this.webRtcService.getPeerId(userId, chatId);
+            server.to(this.getUserRoom(peerId)).emit('webrtc.wake', { chatId, fromUserId: userId });
+            await this.pushService.wakeChat(userId, chatId);
+        } catch (error) {
+            this.emitError(socket, error);
+        }
     }
 
     async openChat(
@@ -58,6 +74,7 @@ export class WebSocketWebRtcService {
                 dto.chatId,
                 peerHasChatOpen,
             );
+            if (!peerHasChatOpen) await this.pushService.wakeChat(userId, dto.chatId);
             const state = result.state;
 
             if ( result.replacedSessionId ) {
@@ -254,6 +271,11 @@ export class WebSocketWebRtcService {
 
             await socket.leave( this.getChatRoom( dto.chatId ) );
             this.forgetOpenChat( socket, dto.chatId );
+            const remainingUserSockets = await server.in(this.getChatRoom(dto.chatId)).fetchSockets();
+            if (remainingUserSockets.some((candidate) => candidate.data.userId === userId)) {
+                socket.emit('webrtc.chat.close.ack', { chatId: dto.chatId });
+                return;
+            }
             const result = await this.webRtcService.closeChat( userId, dto.chatId );
 
             server.to( this.getUserRoom( result.peerId ) ).emit(
@@ -278,6 +300,8 @@ export class WebSocketWebRtcService {
 
         for ( const chatId of chatIds ) {
             try {
+                const remainingUserSockets = await server.in(this.getChatRoom(chatId)).fetchSockets();
+                if (remainingUserSockets.some((candidate) => candidate.data.userId === userId)) continue;
                 const result = await this.webRtcService.closeChat( userId, chatId );
                 server.to( this.getUserRoom( result.peerId ) ).emit(
                     'webrtc.chat.closed',

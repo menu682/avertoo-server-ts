@@ -4,6 +4,7 @@ import { AuthModule } from '../auth/auth.module.js';
 import { ChatModule } from '../chat/chat.module.js';
 import { RedisModule } from '../redis/redis.module.js';
 import { WebRtcModule } from '../webrtc/webrtc.module.js';
+import { PushModule } from '../push/push.module.js';
 
 import { WebSocketGatewayService } from './websocket.gateway.js';
 import { WebSocketAuthService } from './websocket-auth.service.js';
@@ -18,6 +19,7 @@ import { WebSocketWebRtcService } from './websocket-webrtc.service.js';
         RedisModule,
         ChatModule,
         WebRtcModule,
+        PushModule,
     ],
     providers: [
         WebSocketGatewayService,
